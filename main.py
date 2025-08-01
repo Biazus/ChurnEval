@@ -1,5 +1,8 @@
+from typing import Any, Dict, List
 import numpy as np
-
+import logging
+import numpy as np
+import keras
 from keras.models import Sequential
 from keras.layers import Conv1D, MaxPooling1D, Flatten, Dense
 
@@ -12,23 +15,28 @@ HYPERPARAMS = {
     "metrics": ['accuracy']
 }
 
-def build_data_vectors(filename, remove_header=True, remove_first_feature=True):
+def build_data_vectors(
+    filename: str,
+    remove_header: bool = True,
+    remove_first_feature: bool = True
+) -> 'np.ndarray':
     """
     Loads data from a CSV file and optionally removes the header row and the first feature column.
-    Args:
-        filename (str): Path to the CSV file.
-        remove_header (bool, optional): If True, removes the first row (header). Defaults to True.
-        remove_first_feature (bool, optional): If True, removes the first column (typically an ID). Defaults to True.
-
-    Returns:
-        np.ndarray: The processed data array.
     """
-    data = np.genfromtxt(filename, delimiter=',', dtype=object)
+    try:
+        data = np.genfromtxt(filename, delimiter=',', dtype=object)
+    except OSError as e:
+        logging.error(f"File not found or inaccessible: {filename}")
+        raise
+    except Exception as e:
+        logging.error(f"Error reading CSV file: {e}")
+        raise
+    if data is None or data.size == 0:
+        raise ValueError(f"No data loaded from file: {filename}")
     if remove_header:
         data = data[1:]
     if remove_first_feature:
-        # usually first column is the ID so we can ignore it
-        data = np.delete(data, 0, axis=1)  # Remove first column (customer id)
+        data = data[:, 1:]
     return data
 
 
@@ -36,25 +44,19 @@ def normalize_data(data, label_column):
     """
     Normalizes the input data by applying min-max normalization to numerical columns and label encoding to categorical columns.
     Separates the label column and returns the processed feature data and labels.
-
-    Args:
-        data (np.ndarray): Input data array.
-        label_column (int): Index of the label column.
-
-    Returns:
-        tuple: A tuple containing the normalized data array (with the label column removed) and the labels array.
     """
-    for k in range(len(data[0])):
+    data_copy = data.copy()
+    for k in range(len(data_copy[0])):
         try:
-            float(data[0][k])
-            apply_min_max_normalization(data, k)
+            float(data_copy[0][k])
+            apply_min_max_normalization(data_copy, k)
         except ValueError:
-            apply_label_encoding(data, k)
-    labels = data[:, label_column]  # Labels is a binary array
-    data = np.delete(data, label_column, axis=1)  # Remove last column (label)
-    return data, labels
+            apply_label_encoding(data_copy, k)
+    labels = data_copy[:, label_column]
+    data_copy = np.delete(data_copy, label_column, axis=1)
+    return data_copy, labels
 
-def apply_label_encoding(arr, col):
+def apply_label_encoding(arr: 'np.ndarray', col: int) -> None:
     """
     Encodes categorical columns in a NumPy array using label encoding.
 
@@ -65,9 +67,9 @@ def apply_label_encoding(arr, col):
     Returns:
         None: The input array is modified in place with normalized values in the specified columns.
     """
-    unique_values = np.unique(arr[:, col])
-    encoder = {label: idx for idx, label in enumerate(unique_values)}
-    arr[:, col] = [encoder[val] for val in arr[:, col]]
+    # Find unique values and create a mapping to integer codes
+    unique_values, encoded = np.unique(arr[:, col], return_inverse=True)
+    arr[:, col] = encoded.astype(str)
 
 
 def safe_convert(value):
@@ -78,7 +80,7 @@ def safe_convert(value):
         return np.nan
 
 
-def apply_min_max_normalization(arr, col):
+def apply_min_max_normalization(arr: np.ndarray, col: int) -> None:
     """
     Applies min-max normalization to specified columns of a NumPy array.
 
@@ -89,21 +91,26 @@ def apply_min_max_normalization(arr, col):
     Returns:
         None: The input array is modified in place with normalized values in the specified columns.
     """
-    vectorized_conversion = np.vectorize(safe_convert)(arr[:, col])
-    converted_array = np.array(vectorized_conversion, dtype=float)
-    arr[:, col] = converted_array
-    min_val = np.min(arr[:, col].astype(float))
-    max_val = np.nanmax(arr[:, col].astype(float))
-    arr[:, col] = (arr[:, col] - min_val) / (max_val - min_val)
+    # Convert column to float using safe_convert
+    arr[:, col] = np.vectorize(safe_convert)(arr[:, col]).astype(float)
+    col_vals = arr[:, col].astype(float)
+    min_val = np.nanmin(col_vals)
+    max_val = np.nanmax(col_vals)
+    # Avoid division by zero
+    if max_val != min_val:
+        arr[:, col] = (col_vals - min_val) / (max_val - min_val)
+    else:
+        arr[:, col] = 0.0
+
 
 
 def split_dataset(
-        dataset: list,
-        labels: list,
-        training: float = 0.7,
-        validation: float = 0.15,
-        test: float = 0.15
-):
+    dataset: List[Any],
+    labels: List[Any],
+    training: float = 0.7,
+    validation: float = 0.15,
+    test: float = 0.15
+) -> Dict[str, np.ndarray]:
     """
     Splits a dataset and corresponding labels into training, validation, and test subsets.
 
@@ -120,22 +127,31 @@ def split_dataset(
     Raises:
         ValueError: If the sum of training, validation, and test proportions is not 1.
     """
-    if sum([training, validation, test]) != 1:
+    total = training + validation + test
+    if not np.isclose(total, 1.0):
         raise ValueError("Sum of subsets should be 1")
 
-    idx_val = int(training * len(dataset))
-    idx_test = int((training + validation) * len(dataset))
-    train = dataset[:idx_val]
-    val = dataset[idx_val:idx_test]
-    test = dataset[idx_test:]
+    dataset = np.asarray(dataset)
+    labels = np.asarray(labels)
+
+    n_samples = len(dataset)
+    idx_train = int(training * n_samples)
+    idx_val = int((training + validation) * n_samples)
+
+    x_train = dataset[:idx_train].reshape(-1, dataset.shape[1], 1)
+    y_train = labels[:idx_train]
+    x_val = dataset[idx_train:idx_val].reshape(-1, dataset.shape[1], 1)
+    y_val = labels[idx_train:idx_val]
+    x_test = dataset[idx_val:].reshape(-1, dataset.shape[1], 1)
+    y_test = labels[idx_val:]
 
     return {
-        "x_train": train.reshape((train.shape[0], train.shape[1], 1)),
-        "y_train": labels[:idx_val],
-        "x_val": val.reshape((val.shape[0], val.shape[1], 1)),
-        "y_val": labels[idx_val:idx_test],
-        "x_test": test.reshape((test.shape[0], test.shape[1], 1)),
-        "y_test": labels[idx_test:]
+        "x_train": x_train,
+        "y_train": y_train,
+        "x_val": x_val,
+        "y_val": y_val,
+        "x_test": x_test,
+        "y_test": y_test
     }
 
 
@@ -152,7 +168,7 @@ def build_model(num_features):
     model.add(Conv1D(
         filters=32, kernel_size=HYPERPARAMS["kernel_size"], activation=HYPERPARAMS["activation"], input_shape=(num_features, 1))
     )
-    # model.add(MaxPooling1D(pool_size=2))
+    model.add(MaxPooling1D(pool_size=2))
     model.add(Flatten())
     model.add(Dense(64, activation='relu'))
     model.add(Dense(1, activation='sigmoid'))
@@ -164,7 +180,10 @@ def build_model(num_features):
     model.summary()
     return model
 
-def train_model(m, vectors):
+def train_model(
+    m,
+    vectors: dict
+) -> "keras.callbacks.History":
     """
     Trains the given model using provided training and validation data.
 
@@ -175,30 +194,39 @@ def train_model(m, vectors):
     Returns:
         History object containing training metrics.
     """
-    h = m.fit(
+    return m.fit(
         vectors["x_train"], vectors["y_train"],
         batch_size=16,
-        epochs=10,
+        epochs=HYPERPARAMS['epochs'],
         validation_data=(vectors["x_val"], vectors["y_val"])
     )
-    return h
-
 
 def evaluate_model(m, vectors):
     """
-    Evaluates the given model on test data and prints the loss and accuracy.
+    Evaluates the given model on test data and logs the loss and accuracy.
 
     Args:
         m: Trained model to be evaluated.
-        vectors (dict): Dictionary containing 'x_test' and 'y_test' data.
+        vectors (dict): Dictionary containing `x_test` and `y_test` data.
+
+    Returns:
+        tuple: (`loss`, `accuracy`) of the evaluated model.
     """
+    if not isinstance(vectors, dict) or "x_test" not in vectors or "y_test" not in vectors:
+        raise ValueError("`vectors` must be a dict containing 'x_test' and 'y_test' keys.")
+    if vectors["x_test"] is None or vectors["y_test"] is None:
+        raise ValueError("`x_test` and `y_test` in `vectors` must not be None.")
     loss, accuracy = m.evaluate(vectors["x_test"], vectors["y_test"], verbose=0)
-    print('Test loss:', loss)
-    print('Test accuracy:', accuracy)
+    logging.info('Test loss: %s', loss)
+    logging.info('Test accuracy: %s', accuracy)
+    # TODO Remove prints and use logs only
+    print("Test loss: {}".format(loss))
+    print("Test accuracy: {}".format(accuracy))
+    return loss, accuracy
 
 
 if __name__ == "__main__":
-    label_column = 19
+    label_column = 19  # TODO remove hardcoded val
     data = build_data_vectors(filename="WA_Fn-UseC_-Telco-Customer-Churn.csv")
     data, labels = normalize_data(data, label_column)
 
