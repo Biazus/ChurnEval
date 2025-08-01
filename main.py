@@ -1,5 +1,8 @@
 import numpy as np
 
+from keras.models import Sequential
+from keras.layers import Conv1D, MaxPooling1D, Flatten, Dense
+
 def apply_label_encoding(arr, columns):
     """
     Encodes categorical columns in a NumPy array using label encoding.
@@ -20,7 +23,7 @@ def safe_convert(value):
     try:
         return float(value)
     except ValueError:
-        return np.nan  # Tratar strings não numéricas
+        return np.nan
 
 def apply_min_max_normalization(arr, columns):
     """
@@ -41,6 +44,68 @@ def apply_min_max_normalization(arr, columns):
         max_val = np.nanmax(arr[:, i].astype(float))
         arr[:, i] = (arr[:, i] - min_val) / (max_val - min_val)
 
+def split_dataset(dataset: list,
+            labels: list,
+            num_classes: int,
+            training: float = 0.7,
+            validation: float = 0.15,
+            test: float = 0.15):
+    if sum([training, validation, test]) != 1:
+        raise ValueError("Sum of subsets should be 1")
+
+    idx_val = int(training * len(dataset))
+    idx_test = int((training + validation) * len(dataset))
+    train = dataset[:idx_val]
+    val = dataset[idx_val:idx_test]
+    test = dataset[idx_test:]
+
+    return {
+        "x_train": train.reshape((train.shape[0], train.shape[1], 1)),
+        "y_train": labels[:idx_val],
+        "x_val": val.reshape((val.shape[0], val.shape[1], 1)),
+        "y_val": labels[idx_val:idx_test],
+        "x_test": test.reshape((test.shape[0], test.shape[1], 1)),
+        "y_test": labels[idx_test:]
+    }
+
+def build_model(dataset: list, num_classes: int,):
+    model = Sequential()
+    model.add(Conv1D(filters=32, kernel_size=2, activation='relu', input_shape=(19, 1)))
+    # model.add(MaxPooling1D(pool_size=2))
+
+    model.add(Flatten())
+
+    model.add(Dense(64, activation='relu'))
+
+    model.add(Dense(1, activation='sigmoid'))
+
+    model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
+
+    model.summary()
+    return model
+
+def compile_model(m):
+    m.compile(
+        loss='binary_crossentropy',
+        optimizer='adam',
+        metrics=['accuracy']
+    )
+    return m
+
+def train_model(m, vectors):
+    h = m.fit(
+        vectors["x_train"], vectors["y_train"],
+        batch_size=16,
+        epochs=10,
+        validation_data=(vectors["x_val"], vectors["y_val"])
+    )
+    return h
+
+def evaluate_model(m, vectors):
+    loss, accuracy = m.evaluate(vectors["x_test"], vectors["y_test"], verbose=0)
+    print('Test loss:', loss)
+    print('Test accuracy:', accuracy)
+
 if __name__ == "__main__":
     data = np.genfromtxt("WA_Fn-UseC_-Telco-Customer-Churn.csv", delimiter=',', dtype=object)
 
@@ -51,15 +116,13 @@ if __name__ == "__main__":
     apply_min_max_normalization(data, [4, 17, 18])
     labels = data[:, 19]  # Labels is a 0/1 array
     data = np.delete(data, 19, axis=1)  # Remove last column (label)
-    print(data)
-    print(labels)
 
-    # TODO Splitting data between sets of training / val/ test
-    vectors = {
-        "x_train": [],
-        "x_val": [],
-        "x_test": [],
-    }
+    v = split_dataset(data, labels, 2)
 
-    # TODO keep working
 
+    model = build_model(v["x_train"], 2)
+    model = compile_model(model)
+    history = train_model(model, v)
+    print(history.history)
+
+    evaluate_model(model, v)
